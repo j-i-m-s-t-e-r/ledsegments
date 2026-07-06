@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: led-sign-app
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 8080
+    healthCheckPath: /api/health
