@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>14-Segment LED Sign</title>
+<style>
+  :root {
+    color-scheme: dark;
+  }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: #0a0a0a;
+    color: #d6ffe0;
+    font-family: "Segoe UI", Roboto, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 40px 16px;
+    box-sizing: border-box;
+  }
+  h1 {
+    font-size: 1.4rem;
+    letter-spacing: 0.05em;
+    color: #7CFC7C;
+    text-shadow: 0 0 8px rgba(124, 252, 124, 0.5);
+    margin-bottom: 24px;
+    text-align: center;
+  }
+  .panel {
+    background: #111;
+    border: 1px solid #1f2f1f;
+    border-radius: 12px;
+    padding: 24px;
+    width: 100%;
+    max-width: 900px;
+    box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
+  }
+  .controls {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+  input[type="text"] {
+    flex: 1;
+    min-width: 200px;
+    padding: 10px 12px;
+    font-size: 1rem;
+    background: #050505;
+    border: 1px solid #2a3a2a;
+    border-radius: 6px;
+    color: #e8ffe8;
+  }
+  input[type="text"]:focus {
+    outline: none;
+    border-color: #4CAF50;
+  }
+  button {
+    padding: 10px 20px;
+    font-size: 1rem;
+    background: #163016;
+    border: 1px solid #2f5f2f;
+    border-radius: 6px;
+    color: #7CFC7C;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  button:hover {
+    background: #1f4a1f;
+  }
+  .display-wrap {
+    background: #000;
+    border-radius: 8px;
+    padding: 16px;
+    min-height: 100px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow-x: auto;
+  }
+  #ledImage {
+    max-width: 100%;
+    image-rendering: -webkit-optimize-contrast;
+  }
+  .hint {
+    margin-top: 12px;
+    font-size: 0.8rem;
+    color: #557755;
+    text-align: center;
+  }
+  .placeholder {
+    color: #335533;
+    font-size: 0.9rem;
+  }
+</style>
+</head>
+<body>
+  <h1>14-SEGMENT LED SIGN GENERATOR</h1>
+  <div class="panel">
+    <div class="controls">
+      <input type="text" id="textInput" placeholder="Type something..." maxlength="200" autofocus />
+      <button id="renderBtn">Render</button>
+    </div>
+    <div class="display-wrap" id="displayWrap">
+      <span class="placeholder">Your LED sign will appear here</span>
+    </div>
+    <div class="hint">Supports A-Z, 0-9, dash, spaces, and line breaks. Unsupported characters render blank.</div>
+  </div>
+
+  <script>
+    const input = document.getElementById('textInput');
+    const btn = document.getElementById('renderBtn');
+    const wrap = document.getElementById('displayWrap');
+
+    function renderSign() {
+      const text = input.value;
+      if (!text.trim()) return;
+      const url = '/api/render?text=' + encodeURIComponent(text) + '&_=' + Date.now();
+      wrap.innerHTML = '';
+      const img = document.createElement('img');
+      img.id = 'ledImage';
+      img.alt = 'LED rendering of: ' + text;
+      img.src = url;
+      wrap.appendChild(img);
+    }
+
+    btn.addEventListener('click', renderSign);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') renderSign();
+    });
+  </script>
+</body>
+</html>
