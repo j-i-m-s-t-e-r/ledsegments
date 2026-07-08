@@ -1,5 +1,6 @@
 import io
 import os
+import numpy as np
 from flask import Flask, request, send_file, jsonify, send_from_directory
 from PIL import Image
 
@@ -8,6 +9,10 @@ FONT_SHEET_PATH = os.path.join(APP_DIR, "font", "14segmentLEDFont.png")
 STATIC_DIR = os.path.join(APP_DIR, "static")
 
 COLS, ROWS = 10, 7
+
+# Padding added around each detected glyph box before centering it on the
+# uniform output tile canvas.
+GLYPH_PAD = 6
 
 # Character -> (row, col) on the composite sheet (0-indexed)
 CHAR_MAP = {}
@@ -42,15 +47,92 @@ _sheet = None
 _cell_w = None
 _cell_h = None
 _tile_cache = {}
+_row_boxes = None      # list of (y0, y1) per row, detected from real gaps
+_col_boxes_by_row = None  # dict row -> list of (x0, x1) per column, detected from real gaps
+_tile_w = None
+_tile_h = None
+
+
+def _find_boxes(profile, min_gap, min_size):
+    """Given a 1D max-brightness profile, find runs of 'lit' content
+    separated by background gaps, merging small internal gaps (glyph
+    notches) and dropping anything too small to be a real glyph."""
+    thresh = profile.mean() * 0.3
+    is_gap = profile < thresh
+
+    raw = []
+    in_run = False
+    start = None
+    for i, g in enumerate(is_gap):
+        if not g and not in_run:
+            in_run = True
+            start = i
+        elif g and in_run:
+            in_run = False
+            raw.append((start, i - 1))
+    if in_run:
+        raw.append((start, len(is_gap) - 1))
+
+    merged = []
+    for b in raw:
+        if merged and b[0] - merged[-1][1] < min_gap:
+            merged[-1] = (merged[-1][0], b[1])
+        else:
+            merged.append(list(b))
+
+    return [tuple(b) for b in merged if (b[1] - b[0]) >= min_size]
+
+
+def _detect_grid(sheet):
+    """Detect the true per-glyph bounding boxes on the sprite sheet instead
+    of assuming a perfectly uniform grid. The sheet's characters are not
+    equal-width (e.g. 'I' is much narrower than 'M'), so naive division by
+    COLS/ROWS crops into neighboring glyphs. This scans actual background
+    gaps to find real column/row boundaries per character."""
+    arr = np.array(sheet.convert("L"))
+    h, w = arr.shape
+    nominal_row_h = h / ROWS
+
+    # Vertical bands: use a representative x-range (first column's nominal
+    # span) to find the 7 row bands.
+    sample_x0, sample_x1 = 0, int(w / COLS)
+    row_profile = arr[:, sample_x0:sample_x1].max(axis=1)
+    row_boxes = _find_boxes(row_profile, min_gap=20, min_size=nominal_row_h * 0.5)
+
+    if len(row_boxes) != ROWS:
+        # Fall back to uniform rows if detection didn't find exactly ROWS bands
+        row_boxes = [(int(r * nominal_row_h), int((r + 1) * nominal_row_h) - 1) for r in range(ROWS)]
+
+    col_boxes_by_row = {}
+    for r, (y0, y1) in enumerate(row_boxes):
+        band = arr[y0:y1 + 1, :]
+        col_profile = band.max(axis=0)
+        nominal_col_w = w / COLS
+        boxes = _find_boxes(col_profile, min_gap=20, min_size=nominal_col_w * 0.3)
+        if len(boxes) != COLS:
+            # Fall back to uniform columns for this row if detection is off
+            boxes = [(int(c * nominal_col_w), int((c + 1) * nominal_col_w) - 1) for c in range(COLS)]
+        col_boxes_by_row[r] = boxes
+
+    return row_boxes, col_boxes_by_row
 
 
 def load_sheet():
-    global _sheet, _cell_w, _cell_h
+    global _sheet, _cell_w, _cell_h, _row_boxes, _col_boxes_by_row, _tile_w, _tile_h
     if _sheet is None:
         _sheet = Image.open(FONT_SHEET_PATH).convert("RGBA")
         w, h = _sheet.size
         _cell_w = w / COLS
         _cell_h = h / ROWS
+        _row_boxes, _col_boxes_by_row = _detect_grid(_sheet)
+
+        # Uniform output tile size: the largest detected glyph box (plus
+        # padding) across the whole sheet, so every character renders on a
+        # consistent, evenly-spaced canvas regardless of its natural width.
+        max_w = max(x1 - x0 + 1 for boxes in _col_boxes_by_row.values() for x0, x1 in boxes)
+        max_h = max(y1 - y0 + 1 for y0, y1 in _row_boxes)
+        _tile_w = max_w + GLYPH_PAD * 2
+        _tile_h = max_h + GLYPH_PAD * 2
     return _sheet
 
 
@@ -59,11 +141,21 @@ def get_tile(row, col):
     if key in _tile_cache:
         return _tile_cache[key]
     sheet = load_sheet()
-    x0, y0 = int(col * _cell_w), int(row * _cell_h)
-    x1, y1 = int((col + 1) * _cell_w), int((row + 1) * _cell_h)
-    tile = sheet.crop((x0, y0, x1, y1))
-    _tile_cache[key] = tile
-    return tile
+
+    y0, y1 = _row_boxes[row]
+    x0, x1 = _col_boxes_by_row[row][col]
+
+    glyph = sheet.crop((x0, y0, x1 + 1, y1 + 1))
+
+    # Center the glyph on a uniform, padded canvas so every character
+    # occupies the same footprint regardless of its natural width/height.
+    canvas = Image.new("RGBA", (_tile_w, _tile_h), (0, 0, 0, 0))
+    paste_x = (_tile_w - glyph.width) // 2
+    paste_y = (_tile_h - glyph.height) // 2
+    canvas.alpha_composite(glyph, (paste_x, paste_y))
+
+    _tile_cache[key] = canvas
+    return canvas
 
 
 def tile_for_char(ch):
@@ -92,7 +184,7 @@ def render_text(text, max_per_line=20, gap=4, padding=16, bg=(0, 0, 0, 255)):
     if not wrapped_lines:
         wrapped_lines = [""]
 
-    tile_w, tile_h = int(_cell_w), int(_cell_h)
+    tile_w, tile_h = _tile_w, _tile_h
     max_len = max((len(l) for l in wrapped_lines), default=1)
     max_len = max(max_len, 1)
 
