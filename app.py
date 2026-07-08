@@ -1,11 +1,13 @@
 import io
 import os
+import json
 import numpy as np
 from flask import Flask, request, send_file, jsonify, send_from_directory
 from PIL import Image
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 FONT_SHEET_PATH = os.path.join(APP_DIR, "font", "14segmentLEDFont.png")
+GLYPHS_JSON_PATH = os.path.join(APP_DIR, "font", "glyphs.json")
 STATIC_DIR = os.path.join(APP_DIR, "static")
 
 COLS, ROWS = 10, 7
@@ -13,6 +15,10 @@ COLS, ROWS = 10, 7
 # Padding added around each detected glyph box before centering it on the
 # uniform output tile canvas.
 GLYPH_PAD = 6
+
+# LED fill color, sampled from the brightest pixels in the source sheet.
+LED_COLOR = "#8CFF5A"
+LED_GLOW_COLOR = "#4CFF2A"
 
 # Character -> (row, col) on the composite sheet (0-indexed)
 CHAR_MAP = {}
@@ -51,6 +57,7 @@ _row_boxes = None      # list of (y0, y1) per row, detected from real gaps
 _col_boxes_by_row = None  # dict row -> list of (x0, x1) per column, detected from real gaps
 _tile_w = None
 _tile_h = None
+_glyph_data = None  # traced vector paths, loaded from font/glyphs.json
 
 
 def _find_boxes(profile, min_gap, min_size):
@@ -158,6 +165,14 @@ def get_tile(row, col):
     return canvas
 
 
+def load_glyph_data():
+    global _glyph_data
+    if _glyph_data is None:
+        with open(GLYPHS_JSON_PATH) as f:
+            _glyph_data = json.load(f)
+    return _glyph_data
+
+
 def tile_for_char(ch):
     ch_upper = ch.upper()
     if ch_upper == " ":
@@ -168,12 +183,10 @@ def tile_for_char(ch):
     return get_tile(*BLANK_TILE)
 
 
-def render_text(text, max_per_line=20, gap=4, padding=16, bg=(0, 0, 0, 255)):
-    load_sheet()
+def _wrap_lines(text, max_per_line):
     text = text[:MAX_CHARS]
     lines = text.split("\n") if "\n" in text else [text]
 
-    # Wrap long lines to max_per_line characters
     wrapped_lines = []
     for line in lines:
         if not line:
@@ -183,6 +196,12 @@ def render_text(text, max_per_line=20, gap=4, padding=16, bg=(0, 0, 0, 255)):
             wrapped_lines.append(line[i:i + max_per_line])
     if not wrapped_lines:
         wrapped_lines = [""]
+    return wrapped_lines
+
+
+def render_text(text, max_per_line=20, gap=4, padding=16, bg=(0, 0, 0, 255)):
+    load_sheet()
+    wrapped_lines = _wrap_lines(text, max_per_line)
 
     tile_w, tile_h = _tile_w, _tile_h
     max_len = max((len(l) for l in wrapped_lines), default=1)
@@ -203,6 +222,56 @@ def render_text(text, max_per_line=20, gap=4, padding=16, bg=(0, 0, 0, 255)):
     return canvas
 
 
+def render_svg(text, max_per_line=20, gap=4, padding=16):
+    """Render text as a true vector SVG, using pre-traced glyph paths so
+    the output stays crisp at any zoom level or print size."""
+    data = load_glyph_data()
+    tile_w, tile_h = data["tile_width"], data["tile_height"]
+    group_transform = data["group_transform"]
+    glyphs = data["glyphs"]
+
+    wrapped_lines = _wrap_lines(text, max_per_line)
+    max_len = max((len(l) for l in wrapped_lines), default=1)
+    max_len = max(max_len, 1)
+
+    canvas_w = padding * 2 + max_len * tile_w + (max_len - 1) * gap
+    canvas_h = padding * 2 + len(wrapped_lines) * tile_h + (len(wrapped_lines) - 1) * gap
+
+    parts = []
+    parts.append(
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{canvas_w}" height="{canvas_h}" '
+        f'viewBox="0 0 {canvas_w} {canvas_h}">'
+    )
+    parts.append(f'<rect x="0" y="0" width="{canvas_w}" height="{canvas_h}" fill="black"/>')
+    parts.append(
+        '<defs><filter id="ledGlow" x="-60%" y="-60%" width="220%" height="220%">'
+        '<feGaussianBlur stdDeviation="3" result="blur"/>'
+        '<feMerge>'
+        '<feMergeNode in="blur"/>'
+        '<feMergeNode in="SourceGraphic"/>'
+        '</feMerge>'
+        '</filter></defs>'
+    )
+
+    for row_idx, line in enumerate(wrapped_lines):
+        y = padding + row_idx * (tile_h + gap)
+        for col_idx, ch in enumerate(line):
+            ch_upper = ch.upper()
+            d = glyphs.get(ch_upper)
+            if not d:
+                continue  # space or unsupported character: render nothing
+            x = padding + col_idx * (tile_w + gap)
+            parts.append(
+                f'<g transform="translate({x},{y})" filter="url(#ledGlow)">'
+                f'<g transform="{group_transform}" fill="{LED_COLOR}" stroke="none">'
+                f'<path d="{d}"/>'
+                f'</g></g>'
+            )
+
+    parts.append('</svg>')
+    return "".join(parts)
+
+
 @app.route("/")
 def index():
     return send_from_directory(STATIC_DIR, "index.html")
@@ -213,8 +282,9 @@ def static_files(path):
     return send_from_directory(STATIC_DIR, path)
 
 
-@app.route("/api/render")
-def api_render():
+@app.route("/api/render.png")
+@app.route("/api/render")  # legacy alias, defaults to PNG
+def api_render_png():
     text = request.args.get("text", "")
     if not text.strip():
         return jsonify({"error": "text parameter is required"}), 400
@@ -226,12 +296,27 @@ def api_render():
     return send_file(buf, mimetype="image/png")
 
 
+@app.route("/api/render.svg")
+def api_render_svg():
+    text = request.args.get("text", "")
+    if not text.strip():
+        return jsonify({"error": "text parameter is required"}), 400
+
+    svg = render_svg(text)
+    return app.response_class(svg, mimetype="image/svg+xml")
+
+
 @app.route("/api/health")
 def health():
     return jsonify({"status": "ok"})
 
 
+# Warm caches at import time so this works under gunicorn too, not just
+# when run directly with `python app.py`.
+load_sheet()
+load_glyph_data()
+
+
 if __name__ == "__main__":
-    load_sheet()
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
