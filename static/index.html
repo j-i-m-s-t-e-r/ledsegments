@@ -66,9 +66,22 @@
     color: #7CFC7C;
     cursor: pointer;
     transition: background 0.15s ease;
+    white-space: nowrap;
   }
   button:hover {
     background: #1f4a1f;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  button.secondary {
+    background: #0d0d0d;
+    color: #6fae6f;
+    border-color: #1f2f1f;
+  }
+  button.secondary:hover {
+    background: #161616;
   }
   .display-wrap {
     background: #000;
@@ -80,9 +93,16 @@
     justify-content: center;
     overflow-x: auto;
   }
-  #ledImage {
+  .display-wrap svg, .display-wrap img {
     max-width: 100%;
-    image-rendering: -webkit-optimize-contrast;
+    height: auto;
+  }
+  .actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 16px;
+    flex-wrap: wrap;
+    justify-content: center;
   }
   .hint {
     margin-top: 12px;
@@ -93,6 +113,25 @@
   .placeholder {
     color: #335533;
     font-size: 0.9rem;
+  }
+  .toast {
+    position: fixed;
+    bottom: 24px;
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: #163016;
+    border: 1px solid #2f5f2f;
+    color: #b6ffb6;
+    padding: 10px 18px;
+    border-radius: 8px;
+    font-size: 0.9rem;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease, transform 0.2s ease;
+  }
+  .toast.show {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
   }
 </style>
 </head>
@@ -106,29 +145,107 @@
     <div class="display-wrap" id="displayWrap">
       <span class="placeholder">Your LED sign will appear here</span>
     </div>
-    <div class="hint">Supports A-Z, 0-9, dash, spaces, and line breaks. Unsupported characters render blank.</div>
+    <div class="actions" id="actions" style="display: none;">
+      <button class="secondary" id="copyBtn">Copy Image</button>
+      <button class="secondary" id="downloadPngBtn">Download PNG</button>
+      <button class="secondary" id="downloadSvgBtn">Download SVG</button>
+    </div>
+    <div class="hint">Supports A-Z, 0-9, dash, spaces, and line breaks. Unsupported characters render blank. The preview is a true vector SVG, so it stays crisp at any size.</div>
   </div>
+  <div class="toast" id="toast"></div>
 
   <script>
     const input = document.getElementById('textInput');
     const btn = document.getElementById('renderBtn');
     const wrap = document.getElementById('displayWrap');
+    const actions = document.getElementById('actions');
+    const copyBtn = document.getElementById('copyBtn');
+    const downloadPngBtn = document.getElementById('downloadPngBtn');
+    const downloadSvgBtn = document.getElementById('downloadSvgBtn');
+    const toastEl = document.getElementById('toast');
 
-    function renderSign() {
+    let currentText = '';
+    let toastTimer = null;
+
+    function showToast(msg) {
+      toastEl.textContent = msg;
+      toastEl.classList.add('show');
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toastEl.classList.remove('show'), 2200);
+    }
+
+    async function renderSign() {
       const text = input.value;
       if (!text.trim()) return;
-      const url = '/api/render?text=' + encodeURIComponent(text) + '&_=' + Date.now();
-      wrap.innerHTML = '';
-      const img = document.createElement('img');
-      img.id = 'ledImage';
-      img.alt = 'LED rendering of: ' + text;
-      img.src = url;
-      wrap.appendChild(img);
+      currentText = text;
+
+      const svgUrl = '/api/render.svg?text=' + encodeURIComponent(text) + '&_=' + Date.now();
+      try {
+        const res = await fetch(svgUrl);
+        if (!res.ok) throw new Error('render failed');
+        const svgText = await res.text();
+        wrap.innerHTML = svgText;
+        actions.style.display = 'flex';
+      } catch (err) {
+        wrap.innerHTML = '<span class="placeholder">Could not render that text. Try again.</span>';
+        actions.style.display = 'none';
+      }
+    }
+
+    async function fetchPngBlob() {
+      const url = '/api/render.png?text=' + encodeURIComponent(currentText) + '&_=' + Date.now();
+      const res = await fetch(url);
+      if (!res.ok) throw new Error('PNG render failed');
+      return await res.blob();
+    }
+
+    function triggerDownload(blobUrl, filename) {
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
     }
 
     btn.addEventListener('click', renderSign);
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') renderSign();
+    });
+
+    copyBtn.addEventListener('click', async () => {
+      if (!currentText) return;
+      try {
+        const blob = await fetchPngBlob();
+        if (navigator.clipboard && window.ClipboardItem) {
+          await navigator.clipboard.write([
+            new ClipboardItem({ [blob.type]: blob })
+          ]);
+          showToast('Copied to clipboard');
+        } else {
+          throw new Error('Clipboard API not available');
+        }
+      } catch (err) {
+        showToast('Copy not supported in this browser — try Download instead');
+      }
+    });
+
+    downloadPngBtn.addEventListener('click', async () => {
+      if (!currentText) return;
+      try {
+        const blob = await fetchPngBlob();
+        const blobUrl = URL.createObjectURL(blob);
+        triggerDownload(blobUrl, 'led-sign.png');
+        setTimeout(() => URL.revokeObjectURL(blobUrl), 5000);
+      } catch (err) {
+        showToast('Download failed — try again');
+      }
+    });
+
+    downloadSvgBtn.addEventListener('click', () => {
+      if (!currentText) return;
+      const url = '/api/render.svg?text=' + encodeURIComponent(currentText) + '&_=' + Date.now();
+      triggerDownload(url, 'led-sign.svg');
     });
   </script>
 </body>
